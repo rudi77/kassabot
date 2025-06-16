@@ -1,14 +1,14 @@
 # Dependencies
-/node_modules
-/.pnp
+node_modules/
+.pnp/
 .pnp.js
 
 # Testing
-/coverage
+coverage/
 
 # Production
-/build
-/dist
+build/
+dist/
 
 # Misc
 .DS_Store
@@ -24,8 +24,8 @@ yarn-debug.log*
 yarn-error.log*
 
 # Editor directories and files
-.idea
-.vscode
+.idea/
+.vscode/
 *.suo
 *.ntvs*
 *.njsproj
@@ -33,7 +33,7 @@ yarn-error.log*
 *.sw?
 
 # Optional npm cache directory
-.npm
+.npm/
 
 # Optional eslint cache
 .eslintcache
@@ -46,3 +46,7 @@ yarn-error.log*
 
 # Yarn Integrity file
 .yarn-integrity
+
+# Cursor specific
+.cursor/
+.cursor-cache/
