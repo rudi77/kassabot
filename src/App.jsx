@@ -3,29 +3,9 @@ import { BrowserRouter as Router, Routes, Route, Link, useLocation } from 'react
 import { Button } from '@/components/ui/button.jsx'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card.jsx'
 import { Input } from '@/components/ui/input.jsx'
-import { Mic, Plus, Euro, TrendingUp, TrendingDown, MicOff, Trash2, Edit, Calendar, Home } from 'lucide-react'
+import { Mic, Plus, Euro, TrendingUp, TrendingDown, MicOff, Trash2, Edit, Calendar, Home, Download, Database } from 'lucide-react'
+import kassabotDB from '@/lib/database.js'
 import './App.css'
-
-// Local Storage utilities
-const STORAGE_KEY = 'kassabot_entries'
-
-const loadEntries = () => {
-  try {
-    const stored = localStorage.getItem(STORAGE_KEY)
-    return stored ? JSON.parse(stored) : []
-  } catch (error) {
-    console.error('Error loading entries:', error)
-    return []
-  }
-}
-
-const saveEntries = (entries) => {
-  try {
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(entries))
-  } catch (error) {
-    console.error('Error saving entries:', error)
-  }
-}
 
 // Date utilities
 const isToday = (dateString) => {
@@ -124,43 +104,47 @@ function Dashboard() {
   const [entries, setEntries] = useState([])
   const [editingId, setEditingId] = useState(null)
   const [editText, setEditText] = useState('')
+  const [dbInitialized, setDbInitialized] = useState(false)
+  const [loading, setLoading] = useState(true)
 
-  // Load entries from localStorage on component mount
+  // Initialize database
   useEffect(() => {
-    const storedEntries = loadEntries()
-    if (storedEntries.length === 0) {
-      // Initialize with sample data if no stored entries
-      const sampleEntries = [
-        {
-          id: 1,
-          date: new Date().toLocaleDateString('de-DE'),
-          type: 'income',
-          amount: 40.00,
-          description: 'Haarschnitt',
-          time: '14:30'
-        },
-        {
-          id: 2,
-          date: new Date().toLocaleDateString('de-DE'),
-          type: 'expense',
-          amount: 12.00,
-          description: 'Shampoo gekauft',
-          time: '10:15'
-        }
-      ]
-      setEntries(sampleEntries)
-      saveEntries(sampleEntries)
-    } else {
-      setEntries(storedEntries)
+    const initDB = async () => {
+      try {
+        await kassabotDB.init()
+        setDbInitialized(true)
+        await loadEntries()
+      } catch (error) {
+        console.error('Failed to initialize database:', error)
+        // Fallback to localStorage if SQLite fails
+        loadFromLocalStorage()
+      } finally {
+        setLoading(false)
+      }
     }
+    
+    initDB()
   }, [])
 
-  // Save entries to localStorage whenever entries change
-  useEffect(() => {
-    if (entries.length > 0) {
-      saveEntries(entries)
+  const loadEntries = async () => {
+    try {
+      const allEntries = await kassabotDB.getAllEntries()
+      setEntries(allEntries)
+    } catch (error) {
+      console.error('Failed to load entries:', error)
     }
-  }, [entries])
+  }
+
+  const loadFromLocalStorage = () => {
+    try {
+      const stored = localStorage.getItem('kassabot_entries')
+      if (stored) {
+        setEntries(JSON.parse(stored))
+      }
+    } catch (error) {
+      console.error('Failed to load from localStorage:', error)
+    }
+  }
 
   // Initialize Speech Recognition
   useEffect(() => {
@@ -249,30 +233,59 @@ function Dashboard() {
     }
   }
 
-  const handleSubmit = () => {
+  const handleSubmit = async () => {
     if (inputText.trim()) {
       const parsed = parseEntry(inputText)
       
       if (parsed.amount > 0) {
         const now = new Date()
         const newEntry = {
-          id: Date.now(),
           date: now.toLocaleDateString('de-DE'),
           time: now.toLocaleTimeString('de-DE', { hour: '2-digit', minute: '2-digit' }),
           ...parsed
         }
         
-        setEntries(prev => [newEntry, ...prev])
-        setInputText('')
+        try {
+          if (dbInitialized) {
+            const savedEntry = await kassabotDB.addEntry(newEntry)
+            setEntries(prev => [savedEntry, ...prev])
+          } else {
+            // Fallback to localStorage
+            const entryWithId = { id: Date.now(), ...newEntry }
+            setEntries(prev => {
+              const updated = [entryWithId, ...prev]
+              localStorage.setItem('kassabot_entries', JSON.stringify(updated))
+              return updated
+            })
+          }
+          setInputText('')
+        } catch (error) {
+          console.error('Failed to save entry:', error)
+          alert('Fehler beim Speichern der Buchung.')
+        }
       } else {
         alert('Bitte geben Sie einen gültigen Betrag ein.')
       }
     }
   }
 
-  const handleDelete = (id) => {
+  const handleDelete = async (id) => {
     if (confirm('Möchten Sie diesen Eintrag wirklich löschen?')) {
-      setEntries(prev => prev.filter(entry => entry.id !== id))
+      try {
+        if (dbInitialized) {
+          await kassabotDB.deleteEntry(id)
+        }
+        setEntries(prev => {
+          const updated = prev.filter(entry => entry.id !== id)
+          if (!dbInitialized) {
+            localStorage.setItem('kassabot_entries', JSON.stringify(updated))
+          }
+          return updated
+        })
+      } catch (error) {
+        console.error('Failed to delete entry:', error)
+        alert('Fehler beim Löschen der Buchung.')
+      }
     }
   }
 
@@ -281,18 +294,40 @@ function Dashboard() {
     setEditText(`${entry.amount} Euro ${entry.description}`)
   }
 
-  const handleSaveEdit = () => {
+  const handleSaveEdit = async () => {
     if (editText.trim()) {
       const parsed = parseEntry(editText)
       
       if (parsed.amount > 0) {
-        setEntries(prev => prev.map(entry => 
-          entry.id === editingId 
-            ? { ...entry, ...parsed }
-            : entry
-        ))
-        setEditingId(null)
-        setEditText('')
+        try {
+          const updatedEntry = {
+            date: entries.find(e => e.id === editingId)?.date || new Date().toLocaleDateString('de-DE'),
+            time: entries.find(e => e.id === editingId)?.time || new Date().toLocaleTimeString('de-DE', { hour: '2-digit', minute: '2-digit' }),
+            ...parsed
+          }
+
+          if (dbInitialized) {
+            await kassabotDB.updateEntry(editingId, updatedEntry)
+          }
+
+          setEntries(prev => {
+            const updated = prev.map(entry => 
+              entry.id === editingId 
+                ? { id: editingId, ...updatedEntry }
+                : entry
+            )
+            if (!dbInitialized) {
+              localStorage.setItem('kassabot_entries', JSON.stringify(updated))
+            }
+            return updated
+          })
+          
+          setEditingId(null)
+          setEditText('')
+        } catch (error) {
+          console.error('Failed to update entry:', error)
+          alert('Fehler beim Aktualisieren der Buchung.')
+        }
       } else {
         alert('Bitte geben Sie einen gültigen Betrag ein.')
       }
@@ -302,6 +337,60 @@ function Dashboard() {
   const handleCancelEdit = () => {
     setEditingId(null)
     setEditText('')
+  }
+
+  const handleExportCSV = async () => {
+    try {
+      if (dbInitialized) {
+        const blob = await kassabotDB.exportCSV()
+        const url = URL.createObjectURL(blob)
+        const a = document.createElement('a')
+        a.href = url
+        a.download = `kassabot-export-${new Date().toISOString().split('T')[0]}.csv`
+        document.body.appendChild(a)
+        a.click()
+        document.body.removeChild(a)
+        URL.revokeObjectURL(url)
+      } else {
+        // Fallback CSV export
+        const headers = ['Datum', 'Zeit', 'Typ', 'Betrag', 'Beschreibung']
+        const csvContent = [
+          headers.join(','),
+          ...entries.map(entry => [
+            entry.date,
+            entry.time,
+            entry.type === 'income' ? 'Einnahme' : 'Ausgabe',
+            entry.amount.toFixed(2),
+            `"${entry.description}"`
+          ].join(','))
+        ].join('\n')
+        
+        const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' })
+        const url = URL.createObjectURL(blob)
+        const a = document.createElement('a')
+        a.href = url
+        a.download = `kassabot-export-${new Date().toISOString().split('T')[0]}.csv`
+        document.body.appendChild(a)
+        a.click()
+        document.body.removeChild(a)
+        URL.revokeObjectURL(url)
+      }
+    } catch (error) {
+      console.error('Failed to export CSV:', error)
+      alert('Fehler beim Exportieren der Daten.')
+    }
+  }
+
+  if (loading) {
+    return (
+      <div className="min-h-screen bg-gradient-to-br from-blue-50 via-white to-green-50 flex items-center justify-center">
+        <div className="text-center">
+          <Database className="h-12 w-12 mx-auto mb-4 text-blue-500 animate-spin" />
+          <h2 className="text-xl font-semibold text-gray-800 mb-2">Datenbank wird initialisiert...</h2>
+          <p className="text-gray-600">Bitte warten Sie einen Moment.</p>
+        </div>
+      </div>
+    )
   }
 
   // Filter today's entries
@@ -317,6 +406,27 @@ function Dashboard() {
 
   return (
     <div className="container mx-auto px-4 py-8 max-w-4xl">
+      {/* Database Status */}
+      {dbInitialized && (
+        <div className="mb-4 p-3 bg-green-100 border border-green-300 rounded-lg">
+          <div className="flex items-center justify-between">
+            <div className="flex items-center">
+              <Database className="h-5 w-5 text-green-600 mr-2" />
+              <span className="text-green-800 font-medium">SQLite Datenbank aktiv</span>
+            </div>
+            <Button
+              onClick={handleExportCSV}
+              size="sm"
+              variant="outline"
+              className="text-green-700 border-green-300 hover:bg-green-50"
+            >
+              <Download className="h-4 w-4 mr-2" />
+              CSV Export
+            </Button>
+          </div>
+        </div>
+      )}
+
       {/* Stats Cards */}
       <div className="grid grid-cols-1 md:grid-cols-3 gap-6 mb-8">
         <Card className="bg-white/80 backdrop-blur-sm shadow-lg hover:shadow-xl transition-all duration-300 border-0">
@@ -505,18 +615,96 @@ function Dashboard() {
 function History() {
   const [entries, setEntries] = useState([])
   const [selectedPeriod, setSelectedPeriod] = useState('all')
+  const [dbInitialized, setDbInitialized] = useState(false)
+  const [loading, setLoading] = useState(true)
 
   useEffect(() => {
-    const storedEntries = loadEntries()
-    setEntries(storedEntries)
+    const initAndLoad = async () => {
+      try {
+        if (!kassabotDB.isInitialized) {
+          await kassabotDB.init()
+        }
+        setDbInitialized(true)
+        await loadEntries()
+      } catch (error) {
+        console.error('Failed to initialize database:', error)
+        loadFromLocalStorage()
+      } finally {
+        setLoading(false)
+      }
+    }
+    
+    initAndLoad()
   }, [])
 
-  const handleDelete = (id) => {
-    if (confirm('Möchten Sie diesen Eintrag wirklich löschen?')) {
-      const updatedEntries = entries.filter(entry => entry.id !== id)
-      setEntries(updatedEntries)
-      saveEntries(updatedEntries)
+  const loadEntries = async () => {
+    try {
+      const allEntries = await kassabotDB.getAllEntries()
+      setEntries(allEntries)
+    } catch (error) {
+      console.error('Failed to load entries:', error)
     }
+  }
+
+  const loadFromLocalStorage = () => {
+    try {
+      const stored = localStorage.getItem('kassabot_entries')
+      if (stored) {
+        setEntries(JSON.parse(stored))
+      }
+    } catch (error) {
+      console.error('Failed to load from localStorage:', error)
+    }
+  }
+
+  const handleDelete = async (id) => {
+    if (confirm('Möchten Sie diesen Eintrag wirklich löschen?')) {
+      try {
+        if (dbInitialized) {
+          await kassabotDB.deleteEntry(id)
+        }
+        setEntries(prev => {
+          const updated = prev.filter(entry => entry.id !== id)
+          if (!dbInitialized) {
+            localStorage.setItem('kassabot_entries', JSON.stringify(updated))
+          }
+          return updated
+        })
+      } catch (error) {
+        console.error('Failed to delete entry:', error)
+        alert('Fehler beim Löschen der Buchung.')
+      }
+    }
+  }
+
+  const handleExportCSV = async () => {
+    try {
+      if (dbInitialized) {
+        const blob = await kassabotDB.exportCSV()
+        const url = URL.createObjectURL(blob)
+        const a = document.createElement('a')
+        a.href = url
+        a.download = `kassabot-verlauf-${new Date().toISOString().split('T')[0]}.csv`
+        document.body.appendChild(a)
+        a.click()
+        document.body.removeChild(a)
+        URL.revokeObjectURL(url)
+      }
+    } catch (error) {
+      console.error('Failed to export CSV:', error)
+      alert('Fehler beim Exportieren der Daten.')
+    }
+  }
+
+  if (loading) {
+    return (
+      <div className="container mx-auto px-4 py-8 max-w-4xl">
+        <div className="text-center py-12">
+          <Database className="h-12 w-12 mx-auto mb-4 text-blue-500 animate-spin" />
+          <h2 className="text-xl font-semibold text-gray-800">Lade Verlaufsdaten...</h2>
+        </div>
+      </div>
+    )
   }
 
   const filteredEntries = selectedPeriod === 'all' ? entries : groupEntriesByPeriod(entries, selectedPeriod)
@@ -532,6 +720,27 @@ function History() {
 
   return (
     <div className="container mx-auto px-4 py-8 max-w-4xl">
+      {/* Database Status */}
+      {dbInitialized && (
+        <div className="mb-4 p-3 bg-green-100 border border-green-300 rounded-lg">
+          <div className="flex items-center justify-between">
+            <div className="flex items-center">
+              <Database className="h-5 w-5 text-green-600 mr-2" />
+              <span className="text-green-800 font-medium">SQLite Datenbank aktiv</span>
+            </div>
+            <Button
+              onClick={handleExportCSV}
+              size="sm"
+              variant="outline"
+              className="text-green-700 border-green-300 hover:bg-green-50"
+            >
+              <Download className="h-4 w-4 mr-2" />
+              CSV Export
+            </Button>
+          </div>
+        </div>
+      )}
+
       {/* Period Filter */}
       <Card className="bg-white/90 backdrop-blur-sm shadow-xl border-0 mb-8">
         <CardHeader>
